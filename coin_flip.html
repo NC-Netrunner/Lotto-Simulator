@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>The 28-Heads Sim (Pro Edition)</title>
+    <style>
+        :root { --neon: #00ff41; --gold: #ffd700; --bg: #050505; --panel: #111; }
+        body { background: var(--bg); color: white; font-family: 'Courier New', monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
+        
+        #container { background: var(--panel); border: 2px solid #333; padding: 30px; border-radius: 15px; text-align: center; width: 420px; box-shadow: 0 0 40px rgba(0,255,65,0.1); }
+        .label { color: var(--neon); font-size: 0.75rem; letter-spacing: 2px; text-transform: uppercase; }
+        .big-number { font-size: 4.5rem; font-weight: bold; margin: 10px 0; text-shadow: 0 0 15px var(--neon); }
+        
+        #coin-viz { width: 70px; height: 70px; border-radius: 50%; margin: 15px auto; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; font-weight: bold; border: 4px solid #444; }
+        .heads { background: var(--gold); color: #000; border-color: #b8860b; box-shadow: 0 0 20px rgba(212, 175, 55, 0.4); }
+        .tails { background: #222; color: #555; }
+
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 25px; text-align: left; border-top: 1px solid #333; padding-top: 15px; }
+        .stat-val { font-size: 1.1rem; color: #fff; display: block; margin-top: 5px; }
+
+        #log { margin-top: 20px; height: 130px; background: #000; border: 1px solid #222; padding: 10px; font-size: 0.75rem; overflow-y: auto; text-align: left; color: #888; border-radius: 5px; }
+        .log-entry { border-bottom: 1px solid #111; padding: 4px 0; }
+        .log-new-record { color: var(--gold); font-weight: bold; }
+
+        .controls { margin-top: 25px; display: flex; flex-direction: column; gap: 12px; }
+        button { background: transparent; border: 2px solid var(--neon); color: var(--neon); padding: 12px; cursor: pointer; font-family: inherit; font-weight: bold; transition: 0.2s; border-radius: 5px; }
+        button:hover { background: var(--neon); color: black; }
+        button.active { background: #ff4444; border-color: #ff4444; color: white; }
+        
+        .toggle-container { font-size: 0.85rem; color: #aaa; display: flex; justify-content: center; align-items: center; gap: 8px; }
+    </style>
+</head>
+<body>
+
+    <div id="container">
+        <div class="label">Current CPU Streak</div>
+        <div id="streak" class="big-number">0</div>
+        <div id="coin-viz" class="tails">-</div>
+
+        <div class="stats-grid">
+            <div><span class="label">Best Record</span><span id="best-streak" class="stat-val" style="color: var(--gold)">0</span></div>
+            <div><span class="label">Total Flips</span><span id="total-flips" class="stat-val">0</span></div>
+        </div>
+
+        <div style="margin-top: 20px;">
+            <span class="label">Human Time Equivalent</span>
+            <div id="time-elapsed" style="font-size: 1.3rem; color: #ff4444; margin-top: 5px;">0 Years</div>
+        </div>
+
+        <div id="log"></div>
+
+        <div class="controls">
+            <button id="startBtn" onclick="toggleEngine()">START SIMULATION ENGINE</button>
+            <div class="toggle-container">
+                <input type="checkbox" id="fastMode" onchange="updateSpeed()"> 
+                <label for="fastMode">ENGAGE BACKGROUND WORKER (Max CPU)</label>
+            </div>
+        </div>
+    </div>
+
+    <script id="worker-code" type="javascript/worker">
+        let running = false;
+        let isFast = false;
+        let streak = 0;
+        let best = 0;
+        let total = 0;
+        
+        // 64KB buffer for hardware entropy
+        const bufferSize = 65536; 
+        const buffer = new Uint8Array(bufferSize);
+
+        self.onmessage = function(e) {
+            const data = e.data;
+            if (data.cmd === 'start') {
+                running = true;
+                isFast = data.isFast;
+                best = data.best;
+                total = data.total;
+                streak = data.streak;
+                processLoop();
+            } else if (data.cmd === 'stop') {
+                running = false;
+            } else if (data.cmd === 'speed') {
+                isFast = data.isFast;
+            }
+        };
+
+        function processLoop() {
+            if (!running) return;
+
+            if (isFast) {
+                // Run max speed for 50ms chunks to keep UI responsive
+                let chunkEndTime = Date.now() + 50; 
+                let newRecord = false;
+                let batchBest = 0;
+
+                while (running && Date.now() < chunkEndTime) {
+                    crypto.getRandomValues(buffer);
+                    for (let i = 0; i < bufferSize; i++) {
+                        total++;
+                        // True binary check using hardware entropy
+                        if (buffer[i] % 2 === 0) { 
+                            streak++;
+                            if (streak > best) {
+                                best = streak;
+                                newRecord = true;
+                                if (streak > batchBest) batchBest = streak;
+                            }
+                        } else {
+                            streak = 0;
+                        }
+                        
+                        if (streak === 28) {
+                            self.postMessage({ type: 'win', total, streak, best });
+                            return;
+                        }
+                    }
+                }
+                
+                // Report to UI thread
+                self.postMessage({ type: 'update', total, streak, best, newRecord, batchBest });
+                
+                // Yield to allow UI messages to process, then immediately resume
+                setTimeout(processLoop, 0); 
+                
+            } else {
+                // Slow mode: Calculate 1 flip and wait, so user can watch it
+                let singleByte = new Uint8Array(1);
+                crypto.getRandomValues(singleByte);
+                total++;
+                
+                if (singleByte[0] % 2 === 0) {
+                    streak++;
+                    if (streak > best) best = streak;
+                } else {
+                    streak = 0;
+                }
+
+                if (streak === 28) {
+                    self.postMessage({ type: 'win', total, streak, best });
+                    return;
+                }
+
+                self.postMessage({ type: 'update', total, streak, best, newRecord: false });
+                setTimeout(processLoop, 150); // Delay for visual effect
+            }
+        }
+    </script>
+
+    <script>
+        // Load state safely
+        let uiBest = parseInt(localStorage.getItem('best')) || 0;
+        let uiTotal = parseInt(localStorage.getItem('total')) || 0;
+        let uiLogs = JSON.parse(localStorage.getItem('logs')) || [];
+        let engineRunning = false;
+        let lastSaveTime = Date.now();
+
+        // Setup the Web Worker from the hidden script block
+        const blob = new Blob([document.getElementById('worker-code').textContent], { type: "text/javascript" });
+        const worker = new Worker(window.URL.createObjectURL(blob));
+
+        // Initialize UI
+        updateDOM(uiTotal, 0, uiBest);
+        const logBox = document.getElementById('log');
+        if (uiLogs.length === 0) addLog("Engine ready. Cryptography module loaded.");
+        uiLogs.forEach(msg => {
+            const div = document.createElement('div');
+            div.className = "log-entry log-new-record";
+            div.innerText = msg;
+            logBox.appendChild(div);
+        });
+
+        // Listen for data from the background worker
+        worker.onmessage = function(e) {
+            const data = e.data;
+            uiTotal = data.total;
+            uiBest = data.best;
+
+            updateDOM(data.total, data.streak, data.best);
+
+            if (data.newRecord) {
+                let years = (data.total * 10 / 31557600).toFixed(2);
+                addLog(`NEW RECORD: ${data.batchBest} Heads! (Sim Year: ${years})`, true);
+                forceSave(); // Always save on a new record
+            } else {
+                // Throttle hard drive writes to once per second max
+                if (Date.now() - lastSaveTime > 1000) forceSave();
+            }
+
+            if (data.type === 'win') {
+                engineRunning = false;
+                document.getElementById('startBtn').innerText = "SIMULATION COMPLETE";
+                document.getElementById('startBtn').className = "";
+                forceSave();
+                alert("MATHEMATICAL ANOMALY DETECTED: 28 Heads Achieved.");
+            }
+        };
+
+        function updateDOM(total, streak, best) {
+            document.getElementById('streak').innerText = streak;
+            document.getElementById('best-streak').innerText = best;
+            document.getElementById('total-flips').innerText = total.toLocaleString();
+            
+            // 1 flip = 10 seconds of human life (31,557,600 seconds in a year)
+            let years = (total * 10 / 31557600).toFixed(4);
+            document.getElementById('time-elapsed').innerText = `${years} Years`;
+
+            const viz = document.getElementById('coin-viz');
+            if (streak > 0) {
+                viz.innerText = "H";
+                viz.className = "heads";
+            } else {
+                viz.innerText = "T";
+                viz.className = "tails";
+            }
+        }
+
+        function forceSave() {
+            localStorage.setItem('best', uiBest);
+            localStorage.setItem('total', uiTotal);
+            lastSaveTime = Date.now();
+        }
+
+        function addLog(msg, isRecord = false) {
+            const div = document.createElement('div');
+            div.className = isRecord ? "log-entry log-new-record" : "log-entry";
+            div.innerText = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            logBox.prepend(div);
+
+            if (isRecord) {
+                uiLogs.unshift(div.innerText);
+                if (uiLogs.length > 30) uiLogs.pop();
+                localStorage.setItem('logs', JSON.stringify(uiLogs));
+            }
+        }
+
+        function toggleEngine() {
+            engineRunning = !engineRunning;
+            const btn = document.getElementById('startBtn');
+            btn.innerText = engineRunning ? "HALT ENGINE" : "START SIMULATION ENGINE";
+            btn.className = engineRunning ? "active" : "";
+            
+            if (engineRunning) {
+                worker.postMessage({
+                    cmd: 'start',
+                    isFast: document.getElementById('fastMode').checked,
+                    best: uiBest,
+                    total: uiTotal,
+                    streak: 0
+                });
+            } else {
+                worker.postMessage({ cmd: 'stop' });
+                forceSave();
+                addLog("Engine halted.");
+            }
+        }
+
+        function updateSpeed() {
+            worker.postMessage({
+                cmd: 'speed',
+                isFast: document.getElementById('fastMode').checked
+            });
+        }
+    </script>
+</body>
+</html>
